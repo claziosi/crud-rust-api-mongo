@@ -179,7 +179,7 @@ pub(super) async fn get_by_id(id: Path<i32>, object_store: Data<DatabaseStore>) 
 /// updated according `ObjectUpdateRequest` and updated `Object` is returned with status 200.
 /// If object is not found then 404 not found is returned.
 #[utoipa::path(
-    request_body = ObjectUpdateRequest,
+    request_body = JsonObject,
     responses(
         (status = 200, description = "Object updated successfully in the collection_name", body = Object),
         (status = 404, description = "Object not found by id in the collection_name", body = ErrorResponse, example = json!(ErrorResponse::NotFound(String::from("id = 1"))))
