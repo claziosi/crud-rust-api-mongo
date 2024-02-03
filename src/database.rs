@@ -24,7 +24,6 @@ pub(super) fn configure(db: Data<Database>) -> impl FnOnce(&mut ServiceConfig) {
     }
 }
 
-
 /// Object endpoint error responses
 #[derive(Serialize, Deserialize, Clone, ToSchema)]
 pub(super) enum ErrorResponse {
@@ -49,7 +48,7 @@ pub(super) enum ErrorResponse {
         (status = 200, description = "List current object items in the collection_anem", body = [Object])
     )
 )]
-#[get("/get/{collection_name}")]
+#[get("/{collection_name}/get")]
 pub(super) async fn get_all(path: web::Path<String>, db: web::Data<Database>) -> impl Responder {
     let collection_name = path.into_inner();
     let collection:Collection<Document> = db.collection(&collection_name);
@@ -99,7 +98,7 @@ pub(super) async fn get_all(path: web::Path<String>, db: web::Data<Database>) ->
     )
 )]
 
-#[post("/add/{collection_name}")]
+#[post("/{collection_name}/add")]
 pub(super) async fn create(
     path: web::Path<String>,
     object: Json<Value>,
@@ -173,7 +172,7 @@ pub(super) async fn create(
     )
 )]
 
-#[delete("/delete/{collection_name}/{id}")]
+#[delete("/{collection_name}/delete/{id}")]
 pub(super) async fn delete(
     path: web::Path<(String, String)>, // Change id extraction to String
     db: web::Data<Database>,
@@ -222,7 +221,7 @@ pub(super) async fn delete(
         ("id", description = "Unique storage id of Object")
     )
 )]
-#[get("/get/{collection_name}/{id}")]
+#[get("/{collection_name}/get/{id}")]
 pub(super) async fn get_by_id(path: web::Path<(String, String)>, // Change id extraction to String
 db: web::Data<Database>) -> impl Responder {
     
@@ -278,7 +277,7 @@ db: web::Data<Database>) -> impl Responder {
         ("api_key" = [])
     )
 )]
-#[put("/update/{collection_name}/{id}")]
+#[put("/{collection_name}/update/{id}")]
 pub(super) async fn update(
     path: web::Path<(String, String)>,
     object: Json<Value>,
