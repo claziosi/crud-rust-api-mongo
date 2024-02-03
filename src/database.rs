@@ -1,5 +1,3 @@
-use std::sync::Mutex;
-
 use actix_web::{
     delete, get, post, put,
     web::{self, Data, Json, Path, ServiceConfig},
@@ -17,12 +15,6 @@ use mongodb::{
 use crate::{LogApiKey, RequireApiKey};
 
 
-#[derive(Default)]
-pub(super) struct DatabaseStore {
-    objects: Mutex<Vec<JsonObject>>,
-}
-
-
 pub(super) fn configure(db: Data<Database>) -> impl FnOnce(&mut ServiceConfig) {
     |config: &mut ServiceConfig| {
         config
@@ -34,17 +26,6 @@ pub(super) fn configure(db: Data<Database>) -> impl FnOnce(&mut ServiceConfig) {
             .service(get_by_id)
             .service(update);
     }
-}
-
-
-/// Task to do.
-#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
-pub(super) struct JsonObject {
-    /// Collection Name
-    #[schema(example = "MyCollection")]
-    collection_name: String,
-    /// Mark is the task done or not
-    data: Value,
 }
 
 
@@ -72,7 +53,7 @@ pub(super) enum ErrorResponse {
         (status = 200, description = "List current object items in the collection_anem", body = [Object])
     )
 )]
-#[get("/getall/{collection_name}")]
+#[get("/get/{collection_name}")]
 pub(super) async fn get_all(path: web::Path<String>, db: web::Data<Database>) -> impl Responder {
     let collection_name = path.into_inner();
     let collection:Collection<Document> = db.collection(&collection_name);
@@ -121,15 +102,29 @@ pub(super) async fn get_all(path: web::Path<String>, db: web::Data<Database>) ->
         (status = 409, description = "Object with id already exists in the collection_name", body = ErrorResponse, example = json!(ErrorResponse::Conflict(String::from("id = 1"))))
     )
 )]
-#[post("/create")]
-pub(super) async fn create(object: Json<JsonObject>, db: web::Data<Database>) -> impl Responder {
+#[post("/add/{collection_name}")]
+pub(super) async fn create(path: web::Path<String>, object: Json<Value>, db: web::Data<Database>) -> impl Responder {
     let object = &object.into_inner();
-    let collection = db.collection::<serde_json::Value>(&object.collection_name);
+    let collection_name = path.into_inner();
+    let collection:Collection<Document> = db.collection(&collection_name);
+
+    // Convert JSON Value into BSON document
+    let document = match bson::to_bson(&object) {
+        Ok(bson) => match bson {
+            bson::Bson::Document(document) => document,
+            _ => Document::new(),
+        },
+        Err(_) => Document::new(),
+    };
 
     // Insert one document
-    let result = collection.insert_one(object.data.clone(), None).await.unwrap();
-
-    HttpResponse::Created().json(result)
+    match collection.insert_one(document, None).await {
+        Ok(_) => HttpResponse::Created().json(object),
+        Err(e) => {
+            eprintln!("Failed to insert document: {}", e);
+            HttpResponse::InternalServerError().json(e.to_string())
+        }
+    }
 }
 
 /// Delete Object by given path variable id.

@@ -49,7 +49,7 @@ async fn main() -> Result<(), impl Error> {
             database::search
         ),
         components(
-            schemas(database::JsonObject, database::JsonObject, database::ErrorResponse)
+            schemas(database::ErrorResponse)
         ),
         tags(
             (name = "database", description = "Database management endpoints.")
