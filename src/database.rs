@@ -1,6 +1,6 @@
 use actix_web::{
     delete, get, post, put,
-    web::{self, Data, Json, Path, ServiceConfig},
+    web::{self, Data, Json, ServiceConfig},
     HttpResponse, Responder,
 };
 use futures::StreamExt;
@@ -10,10 +10,6 @@ use serde_json::Value;
 use mongodb::{
     bson::{self, doc, oid::ObjectId, Document}, Collection, Database
 };
-
-
-use crate::{LogApiKey, RequireApiKey};
-
 
 pub(super) fn configure(db: Data<Database>) -> impl FnOnce(&mut ServiceConfig) {
     |config: &mut ServiceConfig| {
@@ -282,13 +278,48 @@ db: web::Data<Database>) -> impl Responder {
         ("api_key" = [])
     )
 )]
-#[put("/update/{id}", wrap = "LogApiKey")]
+#[put("/update/{collection_name}/{id}")]
 pub(super) async fn update(
-    id: Path<i32>,
+    path: web::Path<(String, String)>,
+    object: Json<Value>,
+    db: web::Data<Database>,
 ) -> impl Responder {
-    let id = id.into_inner();
+    
+    let (collection_name, id_str) = path.into_inner(); // Extract id as String
+    let collection: Collection<Document> = db.collection(&collection_name);
 
-    HttpResponse::Created().json(id)
+    // Convert the string representation of ObjectId into an actual ObjectId
+    let object_id = match ObjectId::parse_str(&id_str) {
+        Ok(oid) => oid,
+        Err(e) => {
+            eprintln!("Invalid ObjectId format: {}", e);
+            return HttpResponse::BadRequest().json(format!("Invalid ObjectId format"));
+        }
+    };
+
+    // Convert JSON Value into BSON document
+    let document = match bson::to_bson(&object) {
+        Ok(bson) => match bson {
+            bson::Bson::Document(document) => document,
+            _ => return HttpResponse::BadRequest().body("Invalid BSON format"),
+        },
+        Err(_) => return HttpResponse::InternalServerError().body("Failed to convert to BSON"),
+    };
+
+    // Update the object from the collection by _id
+    match collection.replace_one(doc! { "_id": object_id }, document, None).await {
+        Ok(update_result) => {
+            if update_result.modified_count > 0 {
+                HttpResponse::Ok().json(format!("Document _id = {} successfully updated", object_id))
+            } else {
+                HttpResponse::NotFound().json(format!("_id = {}", object_id))
+            }
+        },
+        Err(e) => {
+            eprintln!("Failed to update document with _id {}: {}", object_id, e);
+            HttpResponse::InternalServerError().json(e.to_string())
+        }
+    }
 }
 
 /// Search objects Query
@@ -310,9 +341,43 @@ pub(super) struct SearchObjects {
         (status = 200, description = "Search Objects did not result error", body = [Object]),
     )
 )]
-#[get("/search")]
+
+#[get("/{collection_name}/search")]
 pub(super) async fn search(
+    search: web::Query<SearchObjects>,
+    db: web::Data<Database>,
+    path: web::Path<String>,
 ) -> impl Responder {
-    
-    HttpResponse::Created().json("id")
+    let collection_name = path.into_inner();
+    let collection: Collection<Document> = db.collection(&collection_name);
+
+    let search_value = search.value.clone();
+    let filter = doc! { "value": search_value };
+
+    match collection.find(filter, None).await {
+        Ok(mut cursor) => {
+            let mut results = Vec::new();
+            while let Some(result) = cursor.next().await {
+                match result {
+                    Ok(document) => results.push(document),
+                    Err(e) => return HttpResponse::InternalServerError().json(e.to_string()),
+                }
+            }
+            
+            // Convert BSON documents into JSON Value format
+            let json_results: serde_json::Value = match bson::to_bson(&results) {
+                Ok(bson) => match bson {
+                    bson::Bson::Array(bson_array) => serde_json::to_value(bson_array).unwrap_or_default(),
+                    _ => serde_json::Value::Array(vec![]),
+                },
+                Err(_) => serde_json::Value::Array(vec![]),
+            };
+            
+            HttpResponse::Ok().json(json_results)
+        },
+        Err(e) => {
+            eprintln!("Failed to fetch documents: {}", e);
+            HttpResponse::InternalServerError().json(e.to_string())
+        }
+    }
 }
