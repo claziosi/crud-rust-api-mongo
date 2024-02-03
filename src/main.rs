@@ -11,6 +11,7 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use futures::future::LocalBoxFuture;
+use mongodb::{options::ClientOptions, Client};
 use utoipa::{
     openapi::security::{ApiKey, ApiKeyValue, SecurityScheme},
     Modify, OpenApi,
@@ -19,12 +20,19 @@ use utoipa_rapidoc::RapiDoc;
 use utoipa_redoc::{Redoc, Servable};
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::database::{ErrorResponse, DatabaseStore};
+use crate::database::ErrorResponse;
 
 mod database;
 
 const API_KEY_NAME: &str = "apikey";
 const API_KEY: &str = "utoipa-rocks";
+
+// You would typically put this in your application state.
+async fn create_mongo_client(uri: &str) -> Result<Client, mongodb::error::Error> {
+    let client_options = ClientOptions::parse(uri).await?;
+    Client::with_options(client_options)
+}
+
 
 #[actix_web::main]
 async fn main() -> Result<(), impl Error> {
@@ -62,7 +70,9 @@ async fn main() -> Result<(), impl Error> {
         }
     }
 
-    let store = Data::new(DatabaseStore::default());
+    let mongo_client = Data::new(create_mongo_client("mongodb://localhost:27017").await.unwrap());
+    let db = Data::new(mongo_client.database("mydb"));
+
     // Make instance variable of ApiDoc so all worker threads gets the same instance.
     let openapi = ApiDoc::openapi();
 
@@ -70,7 +80,7 @@ async fn main() -> Result<(), impl Error> {
         // This factory closure is called on each worker thread independently.
         App::new()
             .wrap(Logger::default())
-            .configure(database::configure(store.clone()))
+            .configure(database::configure(db.clone()))
             .service(Redoc::with_url("/redoc", openapi.clone()))
             .service(
                 SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", openapi.clone()),

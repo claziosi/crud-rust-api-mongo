@@ -2,23 +2,31 @@ use std::sync::Mutex;
 
 use actix_web::{
     delete, get, post, put,
-    web::{Data, Json, Path, Query, ServiceConfig},
+    web::{self, Data, Json, Path, ServiceConfig},
     HttpResponse, Responder,
 };
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema, IntoParams};
+use serde_json::Value;
+use mongodb::{
+    bson::{self, doc, Document}, Collection, Database
+};
+
 
 use crate::{LogApiKey, RequireApiKey};
+
 
 #[derive(Default)]
 pub(super) struct DatabaseStore {
     objects: Mutex<Vec<JsonObject>>,
 }
 
-pub(super) fn configure(store: Data<DatabaseStore>) -> impl FnOnce(&mut ServiceConfig) {
+
+pub(super) fn configure(db: Data<Database>) -> impl FnOnce(&mut ServiceConfig) {
     |config: &mut ServiceConfig| {
         config
-            .app_data(store)
+            .app_data(db)
             .service(search)
             .service(get_all)
             .service(create)
@@ -28,17 +36,15 @@ pub(super) fn configure(store: Data<DatabaseStore>) -> impl FnOnce(&mut ServiceC
     }
 }
 
+
 /// Task to do.
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub(super) struct JsonObject {
-    /// Unique id for the object item.
-    #[schema(example = 1)]
-    id: i32,
-    /// Description of the tasks to do.
-    #[schema(example = "Remember to buy groceries")]
-    value: String,
+    /// Collection Name
+    #[schema(example = "MyCollection")]
+    collection_name: String,
     /// Mark is the task done or not
-    checked: bool,
+    data: Value,
 }
 
 
@@ -66,11 +72,37 @@ pub(super) enum ErrorResponse {
         (status = 200, description = "List current object items in the collection_anem", body = [Object])
     )
 )]
-#[get("/getall")]
-pub(super) async fn get_all(object_store: Data<DatabaseStore>) -> impl Responder {
-    let objects = object_store.objects.lock().unwrap();
+#[get("/getall/{collection_name}")]
+pub(super) async fn get_all(path: web::Path<String>, db: web::Data<Database>) -> impl Responder {
+    let collection_name = path.into_inner();
+    let collection:Collection<Document> = db.collection(&collection_name);
 
-    HttpResponse::Ok().json(objects.clone())
+    match collection.find(None, None).await {
+        Ok(mut cursor) => {
+            let mut results = Vec::new();
+            while let Some(result) = cursor.next().await {
+                match result {
+                    Ok(document) => results.push(document),
+                    Err(e) => return HttpResponse::InternalServerError().json(e.to_string()),
+                }
+            }
+            
+            // Convert BSON documents into JSON Value format
+            let json_results: serde_json::Value = match bson::to_bson(&results) {
+                Ok(bson) => match bson {
+                    bson::Bson::Array(bson_array) => serde_json::to_value(bson_array).unwrap_or_default(),
+                    _ => serde_json::Value::Array(vec![]),
+                },
+                Err(_) => serde_json::Value::Array(vec![]),
+            };
+            
+            HttpResponse::Ok().json(json_results)
+        },
+        Err(e) => {
+            eprintln!("Failed to fetch documents: {}", e);
+            HttpResponse::InternalServerError().json(e.to_string())
+        }
+    }
 }
 
 /// Create new Object to shared in-memory storage.
@@ -90,21 +122,14 @@ pub(super) async fn get_all(object_store: Data<DatabaseStore>) -> impl Responder
     )
 )]
 #[post("/create")]
-pub(super) async fn create(object: Json<JsonObject>, object_store: Data<DatabaseStore>) -> impl Responder {
-    let mut objects = object_store.objects.lock().unwrap();
+pub(super) async fn create(object: Json<JsonObject>, db: web::Data<Database>) -> impl Responder {
     let object = &object.into_inner();
+    let collection = db.collection::<serde_json::Value>(&object.collection_name);
 
-    objects
-        .iter()
-        .find(|existing| existing.id == object.id)
-        .map(|existing| {
-            HttpResponse::Conflict().json(ErrorResponse::Conflict(format!("id = {}", existing.id)))
-        })
-        .unwrap_or_else(|| {
-            objects.push(object.clone());
+    // Insert one document
+    let result = collection.insert_one(object.data.clone(), None).await.unwrap();
 
-            HttpResponse::Ok().json(object)
-        })
+    HttpResponse::Created().json(result)
 }
 
 /// Delete Object by given path variable id.
@@ -127,22 +152,10 @@ pub(super) async fn create(object: Json<JsonObject>, object_store: Data<Database
     )
 )]
 #[delete("/delete/{id}", wrap = "RequireApiKey")]
-pub(super) async fn delete(id: Path<i32>, object_store: Data<DatabaseStore>) -> impl Responder {
-    let mut objects = object_store.objects.lock().unwrap();
+pub(super) async fn delete(id: Path<i32>) -> impl Responder {
     let id = id.into_inner();
 
-    let new_objects = objects
-        .iter()
-        .filter(|object| object.id != id)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if new_objects.len() == objects.len() {
-        HttpResponse::NotFound().json(ErrorResponse::NotFound(format!("id = {id}")))
-    } else {
-        *objects = new_objects;
-        HttpResponse::Ok().finish()
-    }
+    HttpResponse::Created().json(id)
 }
 
 /// Get Object by given object id.
@@ -158,17 +171,10 @@ pub(super) async fn delete(id: Path<i32>, object_store: Data<DatabaseStore>) -> 
     )
 )]
 #[get("/get/{id}")]
-pub(super) async fn get_by_id(id: Path<i32>, object_store: Data<DatabaseStore>) -> impl Responder {
-    let objects = object_store.objects.lock().unwrap();
+pub(super) async fn get_by_id(id: Path<i32>) -> impl Responder {
     let id = id.into_inner();
 
-    objects
-        .iter()
-        .find(|object| object.id == id)
-        .map(|object| HttpResponse::Ok().json(object))
-        .unwrap_or_else(|| {
-            HttpResponse::NotFound().json(ErrorResponse::NotFound(format!("id = {id}")))
-        })
+    HttpResponse::Created().json(id)
 }
 
 /// Update Object with given id.
@@ -195,30 +201,10 @@ pub(super) async fn get_by_id(id: Path<i32>, object_store: Data<DatabaseStore>) 
 #[put("/update/{id}", wrap = "LogApiKey")]
 pub(super) async fn update(
     id: Path<i32>,
-    object: Json<JsonObject>,
-    object_store: Data<DatabaseStore>,
 ) -> impl Responder {
-    let mut objects = object_store.objects.lock().unwrap();
     let id = id.into_inner();
-    let object = &object.into_inner();
 
-    let new_objects = objects
-        .iter()
-        .map(|existing| {
-            if existing.id == id {
-                object.clone()
-            } else {
-                existing.clone()
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if new_objects.len() == objects.len() {
-        HttpResponse::NotFound().json(ErrorResponse::NotFound(format!("id = {id}")))
-    } else {
-        *objects = new_objects;
-        HttpResponse::Ok().json(object)
-    }
+    HttpResponse::Created().json(id)
 }
 
 /// Search objects Query
@@ -242,20 +228,7 @@ pub(super) struct SearchObjects {
 )]
 #[get("/search")]
 pub(super) async fn search(
-    query: Query<SearchObjects>,
-    object_store: Data<DatabaseStore>,
 ) -> impl Responder {
-    let objects = object_store.objects.lock().unwrap();
-
-    HttpResponse::Ok().json(
-        objects
-            .iter()
-            .filter(|object| {
-                object.value
-                    .to_lowercase()
-                    .contains(&query.value.to_lowercase())
-            })
-            .cloned()
-            .collect::<Vec<_>>(),
-    )
+    
+    HttpResponse::Created().json("id")
 }

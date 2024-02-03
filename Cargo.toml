@@ -16,3 +16,5 @@ utoipa = {version="4.2.0", features = ["actix_extras"]}
 utoipa-swagger-ui = { version = "6", features = ["actix-web"] }
 utoipa-redoc = { version="3.0.0", features = ["actix-web"] }
 utoipa-rapidoc = { version="3.0.0", features = ["actix-web"] }
+mongodb = "2.0.0"
+warp = "0.3.0"
