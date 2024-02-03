@@ -226,11 +226,39 @@ pub(super) async fn delete(
         ("id", description = "Unique storage id of Object")
     )
 )]
-#[get("/get/{id}")]
-pub(super) async fn get_by_id(id: Path<i32>) -> impl Responder {
-    let id = id.into_inner();
+#[get("/get/{collection_name}/{id}")]
+pub(super) async fn get_by_id(path: web::Path<(String, String)>, // Change id extraction to String
+db: web::Data<Database>) -> impl Responder {
+    
+    let (collection_name, id_str) = path.into_inner(); // Extract id as String
 
-    HttpResponse::Created().json(id)
+    let collection: Collection<Document> = db.collection(&collection_name);
+    
+    println!("collection_name: {}", collection_name);
+
+    // Convert the string representation of ObjectId into an actual ObjectId
+    let object_id = match ObjectId::parse_str(&id_str) {
+        Ok(oid) => oid,
+        Err(e) => {
+            eprintln!("Invalid ObjectId format: {}", e);
+            return HttpResponse::BadRequest().json(format!("Invalid ObjectId format"));
+        }
+    };
+
+    // Find the object from the collection by _id
+    match collection.find_one(doc! { "_id": object_id }, None).await {
+        Ok(Some(document)) => {
+            HttpResponse::Ok().json(document)
+        },
+        Ok(None) => {
+            HttpResponse::NotFound().json(format!("_id = {}", id_str))
+        },
+        Err(e) => {
+            eprintln!("Failed to find document with _id {}: {}", id_str, e);
+            HttpResponse::InternalServerError().json(e.to_string())
+        }
+    }
+
 }
 
 /// Update Object with given id.
