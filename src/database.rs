@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{ToSchema, IntoParams};
 use serde_json::Value;
 use mongodb::{
-    bson::{self, doc, Document}, Collection, Database
+    bson::{self, doc, oid::ObjectId, Document}, Collection, Database
 };
 
 
@@ -102,27 +102,57 @@ pub(super) async fn get_all(path: web::Path<String>, db: web::Data<Database>) ->
         (status = 409, description = "Object with id already exists in the collection_name", body = ErrorResponse, example = json!(ErrorResponse::Conflict(String::from("id = 1"))))
     )
 )]
+
 #[post("/add/{collection_name}")]
-pub(super) async fn create(path: web::Path<String>, object: Json<Value>, db: web::Data<Database>) -> impl Responder {
-    let object = &object.into_inner();
+pub(super) async fn create(
+    path: web::Path<String>,
+    object: Json<Value>,
+    db: web::Data<Database>,
+) -> impl Responder {
+    let object = object.into_inner();
     let collection_name = path.into_inner();
-    let collection:Collection<Document> = db.collection(&collection_name);
+    let collection: Collection<Document> = db.collection(&collection_name);
 
-    // Convert JSON Value into BSON document
-    let document = match bson::to_bson(&object) {
-        Ok(bson) => match bson {
-            bson::Bson::Document(document) => document,
-            _ => Document::new(),
+    match object {
+        // If it's an array, we'll use insert_many
+        Value::Array(array) => {
+            // Convert each JSON Value into BSON document
+            let documents: Vec<Document> = array.into_iter()
+                .filter_map(|item| bson::to_bson(&item).ok())
+                .filter_map(|bson| match bson {
+                    bson::Bson::Document(document) => Some(document),
+                    _ => None,
+                })
+                .collect();
+
+            // Insert many documents
+            match collection.insert_many(documents, None).await {
+                Ok(insert_result) => HttpResponse::Created().json(insert_result.inserted_ids),
+                Err(e) => {
+                    eprintln!("Failed to insert documents: {}", e);
+                    HttpResponse::InternalServerError().json(e.to_string())
+                }
+            }
         },
-        Err(_) => Document::new(),
-    };
+        // If it's not an array, assume it's a single document and use insert_one
+        _ => {
+            // Convert JSON Value into BSON document
+            let document = match bson::to_bson(&object) {
+                Ok(bson) => match bson {
+                    bson::Bson::Document(document) => document,
+                    _ => return HttpResponse::BadRequest().body("Invalid BSON format"),
+                },
+                Err(_) => return HttpResponse::InternalServerError().body("Failed to convert to BSON"),
+            };
 
-    // Insert one document
-    match collection.insert_one(document, None).await {
-        Ok(_) => HttpResponse::Created().json(object),
-        Err(e) => {
-            eprintln!("Failed to insert document: {}", e);
-            HttpResponse::InternalServerError().json(e.to_string())
+            // Insert one document
+            match collection.insert_one(document.clone(), None).await {  // Clone needed because we move `document` here.
+                Ok(_) => HttpResponse::Created().json(object),
+                Err(e) => {
+                    eprintln!("Failed to insert document: {}", e);
+                    HttpResponse::InternalServerError().json(e.to_string())
+                }
+            }
         }
     }
 }
@@ -146,11 +176,42 @@ pub(super) async fn create(path: web::Path<String>, object: Json<Value>, db: web
         ("api_key" = [])
     )
 )]
-#[delete("/delete/{id}", wrap = "RequireApiKey")]
-pub(super) async fn delete(id: Path<i32>) -> impl Responder {
-    let id = id.into_inner();
 
-    HttpResponse::Created().json(id)
+#[delete("/delete/{collection_name}/{id}")]
+pub(super) async fn delete(
+    path: web::Path<(String, String)>, // Change id extraction to String
+    db: web::Data<Database>,
+) -> impl Responder {
+    
+    let (collection_name, id_str) = path.into_inner(); // Extract id as String
+
+    let collection: Collection<Document> = db.collection(&collection_name);
+    
+    println!("collection_name: {}", collection_name);
+
+    // Convert the string representation of ObjectId into an actual ObjectId
+    let object_id = match ObjectId::parse_str(&id_str) {
+        Ok(oid) => oid,
+        Err(e) => {
+            eprintln!("Invalid ObjectId format: {}", e);
+            return HttpResponse::BadRequest().json(format!("Invalid ObjectId format"));
+        }
+    };
+
+    // Remove the object from the collection by _id
+    match collection.delete_one(doc! { "_id": object_id }, None).await {
+        Ok(delete_result) => {
+            if delete_result.deleted_count > 0 {
+                HttpResponse::Ok().json(format!("Document _id = {} successfully removed", id_str))
+            } else {
+                HttpResponse::NotFound().json(format!("_id = {}", id_str))
+            }
+        },
+        Err(e) => {
+            eprintln!("Failed to delete document with _id {}: {}", id_str, e);
+            HttpResponse::InternalServerError().json(e.to_string())
+        }
+    }
 }
 
 /// Get Object by given object id.
